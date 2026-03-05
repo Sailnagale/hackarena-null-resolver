@@ -1,29 +1,63 @@
 let pts = [];
 let drawing = false;
 let monitoring = false;
-let lastTime = "";
+let lastMsg = "";
 
 const videoPreview = document.getElementById("videoPreview");
 const videoFeed = document.getElementById("videoFeed");
 const canvas = document.getElementById("drawCanvas");
 const ctx = canvas.getContext("2d");
-const btnStart = document.getElementById("btnStart");
 const eventLog = document.getElementById("eventLog");
+
+/* ----------------- AUDIO ALERT ----------------- */
+
+function speak(msg) {
+  const speech = new SpeechSynthesisUtterance(msg);
+  speech.lang = "en-US";
+  window.speechSynthesis.speak(speech);
+}
+
+/* ----------------- POPUP ALERT ----------------- */
+
+function popup(msg) {
+  const box = document.createElement("div");
+
+  box.className =
+    "fixed top-6 right-6 bg-red-600 text-white p-4 rounded shadow-lg z-50";
+
+  box.innerText = "🚨 " + msg;
+
+  document.body.appendChild(box);
+
+  setTimeout(() => box.remove(), 4000);
+}
+
+/* ----------------- CANVAS SYNC ----------------- */
 
 function syncCanvas() {
   canvas.width = videoPreview.clientWidth;
   canvas.height = videoPreview.clientHeight;
+
+  canvas.style.width = videoPreview.clientWidth + "px";
+  canvas.style.height = videoPreview.clientHeight + "px";
 }
+
+/* ----------------- TRIPWIRE DRAWING ----------------- */
 
 canvas.addEventListener("mousedown", (e) => {
   if (monitoring) return;
+
+  if (document.getElementById("featureSelect").value !== "tripwire") return;
 
   drawing = true;
   pts = [];
 
   const rect = canvas.getBoundingClientRect();
 
-  pts.push([e.clientX - rect.left, e.clientY - rect.top]);
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  pts.push([x, y]);
 });
 
 canvas.addEventListener("mousemove", (e) => {
@@ -31,7 +65,10 @@ canvas.addEventListener("mousemove", (e) => {
 
   const rect = canvas.getBoundingClientRect();
 
-  pts.push([e.clientX - rect.left, e.clientY - rect.top]);
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  pts.push([x, y]);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -41,16 +78,21 @@ canvas.addEventListener("mousemove", (e) => {
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
 
-  pts.forEach((p) => ctx.lineTo(p[0], p[1]));
+  for (let i = 1; i < pts.length; i++) {
+    ctx.lineTo(pts[i][0], pts[i][1]);
+  }
 
   ctx.stroke();
 });
 
-canvas.addEventListener("mouseup", () => (drawing = false));
+canvas.addEventListener("mouseup", () => {
+  drawing = false;
+});
+
+/* ----------------- VIDEO UPLOAD ----------------- */
 
 document.getElementById("videoInput").addEventListener("change", async (e) => {
   const form = new FormData();
-
   form.append("video", e.target.files[0]);
 
   let r = await fetch("/upload", { method: "POST", body: form });
@@ -59,28 +101,24 @@ document.getElementById("videoInput").addEventListener("change", async (e) => {
 
   videoPreview.src = "/uploads/" + data.filename;
 
+  videoPreview.classList.remove("hidden");
+
   videoPreview.onloadedmetadata = () => {
     videoPreview.play();
 
-    videoPreview.classList.remove("hidden");
-
     syncCanvas();
 
-    btnStart.disabled = false;
+    canvas.style.zIndex = 20;
   };
 });
 
-btnStart.addEventListener("click", async () => {
-  if (monitoring) {
-    await fetch("/stop", { method: "POST" });
-    location.reload();
-    return;
-  }
+/* ----------------- START MONITORING ----------------- */
 
+async function startMonitoring() {
   const scaleX = videoPreview.videoWidth / canvas.width;
   const scaleY = videoPreview.videoHeight / canvas.height;
 
-  const scaledPoints = pts.map((p) => [
+  const scaled = pts.map((p) => [
     Math.round(p[0] * scaleX),
     Math.round(p[1] * scaleY),
   ]);
@@ -94,10 +132,8 @@ btnStart.addEventListener("click", async () => {
 
     body: JSON.stringify({
       feature: document.getElementById("featureSelect").value,
-
-      color: document.getElementById("colorInput").value || "red",
-
-      points: scaledPoints,
+      color: document.getElementById("colorInput").value,
+      points: scaled,
     }),
   });
 
@@ -110,27 +146,53 @@ btnStart.addEventListener("click", async () => {
 
   videoFeed.classList.remove("hidden");
 
-  startPolling();
-});
+  poll();
+}
 
-function startPolling() {
+document.getElementById("startBtn").onclick = startMonitoring;
+
+/* ----------------- STOP ----------------- */
+
+document.getElementById("stopBtn").onclick = async () => {
+  await fetch("/stop", { method: "POST" });
+
+  monitoring = false;
+
+  location.reload();
+};
+
+/* ----------------- RESTART ----------------- */
+
+document.getElementById("restartBtn").onclick = () => {
+  location.reload();
+};
+
+/* ----------------- STATUS POLLING ----------------- */
+
+function poll() {
   setInterval(async () => {
     if (!monitoring) return;
 
-    let r = await fetch("/status");
+    const r = await fetch("/status");
 
-    let d = await r.json();
+    const d = await r.json();
 
-    if (d.alert && d.time !== lastTime) {
-      lastTime = d.time;
+    if (!d.alert) return;
 
-      const entry = document.createElement("div");
+    if (d.msg === lastMsg) return;
 
-      entry.className = "text-red-400 mb-1";
+    lastMsg = d.msg;
 
-      entry.innerHTML = `[${d.time}] ${d.msg}`;
+    const entry = document.createElement("div");
 
-      eventLog.prepend(entry);
-    }
+    entry.className = "text-red-400";
+
+    entry.innerHTML = `[${d.time}] ${d.msg}`;
+
+    eventLog.prepend(entry);
+
+    popup(d.msg);
+
+    speak(d.msg);
   }, 1000);
 }

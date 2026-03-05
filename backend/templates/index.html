@@ -7,72 +7,93 @@
 <script src="https://cdn.tailwindcss.com"></script>
 
 <style>
+
 .video-box{
 position:relative;
 background:black;
-width:100%;
 aspect-ratio:16/9;
 }
-canvas{
+
+#drawCanvas{
 position:absolute;
 top:0;
 left:0;
-z-index:10;
 cursor:crosshair;
 }
+
 </style>
 
 </head>
 
-<body class="bg-slate-950 text-white p-6">
+<body class="bg-slate-950 text-white">
 
-<div class="max-w-6xl mx-auto grid grid-cols-3 gap-6">
+<nav class="bg-slate-900 p-4 flex justify-between">
+
+<div class="font-bold text-cyan-400">
+ThreatSense AI
+</div>
+
+<div class="space-x-4">
+<a href="#">Home</a>
+<a href="#">About</a>
+<a href="#">Contact</a>
+</div>
+
+</nav>
+
+<div class="p-6 grid grid-cols-3 gap-6">
 
 <div class="col-span-2">
 
-<div class="video-box rounded-xl overflow-hidden border border-slate-800">
+<div class="video-box rounded-xl border border-slate-700 overflow-hidden">
 
-<video id="videoPreview" class="w-full h-full hidden" muted></video>
-
-<img id="videoFeed" class="w-full h-full hidden">
+<video id="videoPreview" class="hidden w-full"></video>
+<img id="videoFeed" class="hidden w-full">
 
 <canvas id="drawCanvas"></canvas>
 
 </div>
 
-<div class="flex gap-3 mt-4">
+<div class="flex gap-3 mt-4 flex-wrap">
 
-<input type="file" id="videoInput" hidden>
+<input type="file" id="videoInput">
 
-<button onclick="videoInput.click()" class="bg-slate-800 px-4 py-2 rounded">
-Upload
-</button>
-
-<select id="featureSelect" class="bg-slate-800 px-3 py-2 rounded">
+<select id="featureSelect" class="bg-black p-2 rounded">
 
 <option value="master">Master</option>
-
 <option value="tripwire">Tripwire</option>
 
 </select>
 
-<input id="colorInput" placeholder="red"
-class="bg-black px-3 py-2 rounded border border-slate-700 w-24">
+<select id="colorInput" class="bg-black p-2 rounded">
 
-<button id="btnStart"
-class="bg-cyan-600 px-4 py-2 rounded">
-Start Monitoring
+<option value="red">Red</option>
+<option value="blue">Blue</option>
+<option value="green">Green</option>
+
+</select>
+
+<button id="startBtn" class="bg-green-600 px-4 py-2 rounded">
+Start
+</button>
+
+<button id="stopBtn" class="bg-red-600 px-4 py-2 rounded">
+Stop
+</button>
+
+<button id="restartBtn" class="bg-yellow-600 px-4 py-2 rounded">
+Restart
 </button>
 
 </div>
 
 </div>
 
-<div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+<div class="bg-slate-900 rounded-xl border border-slate-700 p-4">
 
 <h2 class="font-bold mb-3">Detection Log</h2>
 
-<div id="eventLog" class="text-xs"></div>
+<div id="eventLog" class="text-sm"></div>
 
 </div>
 

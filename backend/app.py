@@ -5,49 +5,53 @@ import numpy as np
 from datetime import datetime
 from flask import Flask, render_template, Response, request, jsonify, send_from_directory
 from ultralytics import YOLO
+from dotenv import load_dotenv
+from twilio.rest import Client
 
-app = Flask(__name__)
+load_dotenv()
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ACC_SID=os.getenv("TWILIO_ACCOUNT_SID")
+AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN")
+WHATSAPP_FROM=os.getenv("TWILIO_WHATSAPP_FROM")
+TARGET_WHATSAPP=os.getenv("TARGET_WHATSAPP")
 
-model = YOLO("yolo11n.pt")
+twilio_client=Client(ACC_SID,AUTH_TOKEN)
 
-# ---------------- SYSTEM STATE ----------------
+app=Flask(__name__)
 
-state = {
-    "video": None,
-    "monitor": False,
-    "feature": "master",
-    "color": "red",
-    "points": [],
-    "last_alert": 0,
-    "status": {"alert": False, "msg": "", "time": ""}
+UPLOAD_FOLDER="uploads"
+os.makedirs(UPLOAD_FOLDER,exist_ok=True)
+
+model=YOLO("yolo11n.pt")
+
+state={
+"video":None,
+"monitor":False,
+"feature":"master",
+"color":"red",
+"points":[],
+"status":{"alert":False,"msg":"","time":""}
 }
 
-# movement tracking
-prev_centers = {}
-agitation_score = {}
-
-alert_persistence_timer = 0
+prev_centers={}
+agitation_score={}
+last_whatsapp=0
 
 
-# ---------------- COLOR DETECTION ----------------
+def check_color(crop,color):
 
-def check_color(crop, color):
-
-    if crop is None or crop.size == 0:
+    if crop is None or crop.size==0:
         return False
 
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hsv=cv2.cvtColor(crop,cv2.COLOR_BGR2HSV)
 
-    ranges = {
-        "red":[((0,100,100),(10,255,255)),((160,100,100),(180,255,255))],
-        "blue":[((100,150,0),(140,255,255))],
-        "green":[((35,100,100),(85,255,255))]
+    ranges={
+    "red":[((0,100,100),(10,255,255)),((160,100,100),(180,255,255))],
+    "blue":[((100,150,0),(140,255,255))],
+    "green":[((35,100,100),(85,255,255))]
     }
 
-    target = ranges.get(color,ranges["red"])
+    target=ranges.get(color,ranges["red"])
 
     mask=None
 
@@ -62,151 +66,119 @@ def check_color(crop, color):
     return ratio>0.15
 
 
-# ---------------- VIDEO ENGINE ----------------
+def send_whatsapp(msg):
+
+    global last_whatsapp
+
+    if time.time()-last_whatsapp<30:
+        return
+
+    try:
+
+        twilio_client.messages.create(
+        from_=WHATSAPP_FROM,
+        body="🚨 CCTV ALERT: "+msg,
+        to=TARGET_WHATSAPP)
+
+        last_whatsapp=time.time()
+
+    except:
+        pass
+
 
 def generate_frames():
 
-    global alert_persistence_timer
+    cap=cv2.VideoCapture(state["video"])
 
-    while True:
+    while cap.isOpened():
 
-        if not state["monitor"] or state["video"] is None:
+        if not state["monitor"]:
             time.sleep(0.1)
             continue
 
-        cap=cv2.VideoCapture(state["video"])
+        ret,frame=cap.read()
 
-        while cap.isOpened() and state["monitor"]:
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES,0)
+            continue
 
-            ret,frame=cap.read()
+        results=model.track(frame,persist=True,classes=[0],verbose=False)
 
-            if not ret:
-                break
+        alert_msg=None
+        red_present=False
 
-            results=model.track(frame,persist=True,classes=[0],verbose=False,imgsz=320)
+        pts=np.array(state["points"],np.int32)
 
-            pts=np.array(state["points"],np.int32)
+        if len(pts)>1:
+            cv2.polylines(frame,[pts],False,(0,255,255),3)
 
-            if len(pts)>1:
-                cv2.polylines(frame,[pts],False,(0,255,255),2)
+        if results[0].boxes.id is not None:
 
-            alert_this_frame=False
-            current_msg="Normal Operation"
+            boxes=results[0].boxes.xyxy.cpu().numpy()
+            ids=results[0].boxes.id.int().cpu().numpy()
 
-            red_person_detected=False
+            if len(ids)>=5:
+                alert_msg="Crowd Detected"
 
-            if results[0].boxes.id is not None:
+            for box,tid in zip(boxes,ids):
 
-                boxes=results[0].boxes.xyxy.cpu().numpy()
-                track_ids=results[0].boxes.id.int().cpu().numpy()
+                x1,y1,x2,y2=map(int,box)
 
-                # -------- CROWD DETECTION --------
+                cx=(x1+x2)//2
+                cy=y2
 
-                if len(track_ids) >= 5:
+                torso=frame[y1:y1+(y2-y1)//3,x1:x2]
 
-                    alert_this_frame=True
-                    current_msg=f"Crowd Detected ({len(track_ids)})"
+                color_match=check_color(torso,state["color"])
 
-                for box,tid in zip(boxes,track_ids):
+                if color_match:
+                    red_present=True
+                    alert_msg="Target Person Detected"
 
-                    x1,y1,x2,y2=map(int,box)
+                if state["feature"]=="tripwire" and len(pts)>1:
 
-                    cx=int((x1+x2)/2)
-                    cy=y2
+                    dist=cv2.pointPolygonTest(pts,(cx,cy),True)
 
-                    torso=frame[y1:y1+(y2-y1)//3,x1:x2]
+                    if abs(dist)<20:
+                        alert_msg="Tripwire Breach"
 
-                    color_match=check_color(torso,state["color"])
+                if not red_present:
 
-                    if color_match:
-                        red_person_detected=True
+                    if tid in prev_centers:
 
-                    is_alert=False
+                        px,py=prev_centers[tid]
 
-                    # ---------- MASTER MODE ----------
+                        speed=((cx-px)**2+(cy-py)**2)**0.5
 
-                    if state["feature"]=="master" and color_match:
+                        if speed>10:
+                            agitation_score[tid]=agitation_score.get(tid,0)+1
 
-                        is_alert=True
-                        current_msg="Target Person Detected"
+                        if agitation_score.get(tid,0)>3:
+                            alert_msg="Physical Conflict Detected"
 
-                    # ---------- TRIPWIRE ----------
+                prev_centers[tid]=(cx,cy)
 
-                    if state["feature"]=="tripwire" and len(pts)>1:
+                color=(0,0,255) if color_match else (0,255,0)
 
-                        dist=cv2.pointPolygonTest(pts,(cx,cy),True)
+                cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
 
-                        if abs(dist)<20:
+        if alert_msg:
 
-                            is_alert=True
-                            current_msg="Tripwire Breach"
+            state["status"]={
+            "alert":True,
+            "msg":alert_msg,
+            "time":datetime.now().strftime("%H:%M:%S")
+            }
 
-                    # ---------- CONFLICT DETECTION ----------
+            send_whatsapp(alert_msg)
 
-                    if not red_person_detected:
+        ret,buffer=cv2.imencode(".jpg",frame)
 
-                        if tid in prev_centers:
+        frame=buffer.tobytes()
 
-                            px,py=prev_centers[tid]
+        yield(b'--frame\r\n'
+        b'Content-Type: image/jpeg\r\n\r\n'+frame+b'\r\n')
 
-                            speed=np.sqrt((cx-px)**2+(cy-py)**2)
-
-                            if speed>10:
-
-                                agitation_score[tid]=agitation_score.get(tid,0)+1
-
-                            else:
-
-                                agitation_score[tid]=max(0,agitation_score.get(tid,0)-0.5)
-
-                            if agitation_score.get(tid,0)>2:
-
-                                is_alert=True
-                                current_msg="Physical Conflict Detected"
-
-                    prev_centers[tid]=(cx,cy)
-
-                    # ---------- VISUALS ----------
-
-                    color=(0,0,255) if color_match else (0,255,0)
-
-                    cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
-
-                    cv2.circle(frame,(cx,cy),4,(255,0,0),-1)
-
-                    if is_alert:
-                        alert_this_frame=True
-
-            # ---------- ALERT PERSISTENCE ----------
-
-            if alert_this_frame:
-                alert_persistence_timer=90
-            else:
-                alert_persistence_timer=max(0,alert_persistence_timer-1)
-
-            if alert_persistence_timer>0:
-
-                state["status"]={
-                    "alert":True,
-                    "msg":current_msg,
-                    "time":datetime.now().strftime("%H:%M:%S")
-                }
-
-            else:
-
-                state["status"]["alert"]=False
-
-            ret,buffer=cv2.imencode('.jpg',frame)
-
-            frame=buffer.tobytes()
-
-            yield(b'--frame\r\n'
-                  b'Content-Type: image/jpeg\r\n\r\n'+frame+b'\r\n')
-
-        cap.release()
-
-
-# ---------------- ROUTES ----------------
 
 @app.route("/")
 def index():
@@ -228,7 +200,7 @@ def upload():
 
 
 @app.route("/uploads/<name>")
-def serve_video(name):
+def serve(name):
     return send_from_directory(UPLOAD_FOLDER,name)
 
 
@@ -238,12 +210,11 @@ def start():
     data=request.json
 
     state["feature"]=data["feature"]
-    state["color"]=data["color"]
     state["points"]=data["points"]
+    state["color"]=data["color"]
     state["monitor"]=True
-    state["last_alert"]=0
 
-    return jsonify({"status":"ok"})
+    return jsonify({"status":"started"})
 
 
 @app.route("/stop",methods=["POST"])

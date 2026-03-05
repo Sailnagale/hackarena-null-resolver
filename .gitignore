@@ -1,0 +1,54 @@
+# Environment variables
+
+.env
+backend/.env
+
+# Python cache
+
+**pycache**/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+
+venv/
+env/
+.venv/
+
+# Uploads and media files
+
+uploads/
+backend/uploads/
+
+# Video files
+
+*.mp4
+*.webm
+*.avi
+*.mov
+
+# Logs
+
+*.log
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# IDE files
+
+.vscode/
+.idea/
+
+# Build / distribution
+
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+
+*.tmp
+*.temp

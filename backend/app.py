@@ -13,6 +13,8 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 model = YOLO("yolo11n.pt")
 
+# ---------------- SYSTEM STATE ----------------
+
 state = {
     "video": None,
     "monitor": False,
@@ -22,6 +24,15 @@ state = {
     "last_alert": 0,
     "status": {"alert": False, "msg": "", "time": ""}
 }
+
+# movement tracking
+prev_centers = {}
+agitation_score = {}
+
+alert_persistence_timer = 0
+
+
+# ---------------- COLOR DETECTION ----------------
 
 def check_color(crop, color):
 
@@ -51,7 +62,11 @@ def check_color(crop, color):
     return ratio>0.15
 
 
+# ---------------- VIDEO ENGINE ----------------
+
 def generate_frames():
+
+    global alert_persistence_timer
 
     while True:
 
@@ -68,16 +83,31 @@ def generate_frames():
             if not ret:
                 break
 
-            results=model.track(frame,persist=True,classes=[0],verbose=False)
+            results=model.track(frame,persist=True,classes=[0],verbose=False,imgsz=320)
 
             pts=np.array(state["points"],np.int32)
 
             if len(pts)>1:
                 cv2.polylines(frame,[pts],False,(0,255,255),2)
 
+            alert_this_frame=False
+            current_msg="Normal Operation"
+
+            red_person_detected=False
+
             if results[0].boxes.id is not None:
 
-                for box in results[0].boxes.xyxy.cpu().numpy():
+                boxes=results[0].boxes.xyxy.cpu().numpy()
+                track_ids=results[0].boxes.id.int().cpu().numpy()
+
+                # -------- CROWD DETECTION --------
+
+                if len(track_ids) >= 5:
+
+                    alert_this_frame=True
+                    current_msg=f"Crowd Detected ({len(track_ids)})"
+
+                for box,tid in zip(boxes,track_ids):
 
                     x1,y1,x2,y2=map(int,box)
 
@@ -88,37 +118,83 @@ def generate_frames():
 
                     color_match=check_color(torso,state["color"])
 
+                    if color_match:
+                        red_person_detected=True
+
                     is_alert=False
 
+                    # ---------- MASTER MODE ----------
+
                     if state["feature"]=="master" and color_match:
+
                         is_alert=True
+                        current_msg="Target Person Detected"
 
-                    elif state["feature"]=="tripwire":
+                    # ---------- TRIPWIRE ----------
 
-                        if len(pts)>1:
+                    if state["feature"]=="tripwire" and len(pts)>1:
 
-                            dist=cv2.pointPolygonTest(pts,(cx,cy),True)
+                        dist=cv2.pointPolygonTest(pts,(cx,cy),True)
 
-                            if abs(dist)<20:
+                        if abs(dist)<20:
+
+                            is_alert=True
+                            current_msg="Tripwire Breach"
+
+                    # ---------- CONFLICT DETECTION ----------
+
+                    if not red_person_detected:
+
+                        if tid in prev_centers:
+
+                            px,py=prev_centers[tid]
+
+                            speed=np.sqrt((cx-px)**2+(cy-py)**2)
+
+                            if speed>10:
+
+                                agitation_score[tid]=agitation_score.get(tid,0)+1
+
+                            else:
+
+                                agitation_score[tid]=max(0,agitation_score.get(tid,0)-0.5)
+
+                            if agitation_score.get(tid,0)>2:
+
                                 is_alert=True
+                                current_msg="Physical Conflict Detected"
+
+                    prev_centers[tid]=(cx,cy)
+
+                    # ---------- VISUALS ----------
+
+                    color=(0,0,255) if color_match else (0,255,0)
+
+                    cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+
+                    cv2.circle(frame,(cx,cy),4,(255,0,0),-1)
 
                     if is_alert:
+                        alert_this_frame=True
 
-                        cv2.rectangle(frame,(x1,y1),(x2,y2),(0,0,255),3)
+            # ---------- ALERT PERSISTENCE ----------
 
-                        if time.time()-state["last_alert"]>2:
+            if alert_this_frame:
+                alert_persistence_timer=90
+            else:
+                alert_persistence_timer=max(0,alert_persistence_timer-1)
 
-                            state["last_alert"]=time.time()
+            if alert_persistence_timer>0:
 
-                            state["status"]={
-                                "alert":True,
-                                "msg":f"{state['feature'].upper()} ALERT",
-                                "time":datetime.now().strftime("%H:%M:%S")
-                            }
+                state["status"]={
+                    "alert":True,
+                    "msg":current_msg,
+                    "time":datetime.now().strftime("%H:%M:%S")
+                }
 
-                    else:
+            else:
 
-                        cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                state["status"]["alert"]=False
 
             ret,buffer=cv2.imencode('.jpg',frame)
 
@@ -129,6 +205,8 @@ def generate_frames():
 
         cap.release()
 
+
+# ---------------- ROUTES ----------------
 
 @app.route("/")
 def index():
